@@ -381,6 +381,16 @@ case "$action" in
     reconcile_secrets
     "${kubectl_command[@]}" label namespace "$namespace" \
       bharathcloudops.com/wordpress-site="$site_id" --overwrite >/dev/null
+    # A cron Job that can never start (for example an image pull failure) keeps the
+    # Forbid concurrency slot and silently stops WP-Cron, and a Job spec cannot be
+    # updated in place. Remove cron Jobs that have been active for over 15 minutes.
+    "${kubectl_command[@]}" --namespace "$namespace" get jobs \
+      --selector app.kubernetes.io/component=cron --output json 2>/dev/null |
+      jq -r '.items[] | select((.status.active // 0) > 0 and (now - (.metadata.creationTimestamp | fromdateiso8601)) > 900) | .metadata.name' |
+      while IFS= read -r stuck_job; do
+        printf 'wordpress_cron_stuck_job_removed=%s\n' "$stuck_job"
+        "${kubectl_command[@]}" --namespace "$namespace" delete job "$stuck_job" --wait=false >/dev/null
+      done
     "${helm_command[@]}" upgrade --install "$release" "$chart_root" \
       "${helm_values[@]}" --create-namespace --atomic --cleanup-on-fail --wait \
       --timeout 15m --history-max 10 \
