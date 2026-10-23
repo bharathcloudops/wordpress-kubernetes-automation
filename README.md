@@ -36,6 +36,7 @@ from local machines are not part of the production path.
 | `status` | Read deployment, StatefulSet, service, ingress, CronJob, and network-policy state |
 | `backup` | Start the selected site's backup CronJob and wait for completion |
 | `verify-backup` | Restore a selected site-tagged snapshot into temporary storage and verify database, webroot, extensions, and uploads |
+| `verify-release` | Read-only proof that a deployment matches its release: the deployed image digest equals the released digest, WordPress core on the volume equals the core in the image, no core file lacks group read, the cron job uses the released image with an image pull secret, and `/wp-login.php` returns HTTP 200 through the ingress |
 | `restore` | Take a pre-restore backup, validate the requested snapshot, replace the selected database/content, and verify the site |
 
 Deploy does not uninstall releases or delete namespaces. It rejects attempts to change the immutable storage class of existing PVCs, adds a retained storage class for future sites, marks bound PVs `Retain`, and relies on the chart's PVC keep policy. Configuration checksums roll only the selected WordPress pod. After rollout, WordPress object cache and Nginx FastCGI cache are cleared and tested.
