@@ -32,7 +32,7 @@ repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 chart_root="$repository_root/.shared-chart/charts/wordpress"
 
 case "$action" in
-  validate|deploy|backup|verify-backup|restore|status)
+  validate|deploy|backup|verify-backup|verify-release|restore|status)
     ;;
   *)
     printf 'Unsupported WordPress action: %s\n' "$action" >&2
@@ -556,5 +556,49 @@ PHP
   status)
     "${kubectl_command[@]}" --namespace "$namespace" get deployment,statefulset,service,ingress,cronjob,networkpolicy >/dev/null
     printf 'wordpress_status=ready\n'
+    ;;
+  verify-release)
+    if [[ ! "$image_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      printf 'verify-release requires the immutable image digest.\n' >&2
+      exit 2
+    fi
+    deployed_image=$("${kubectl_command[@]}" --namespace "$namespace" get deployment wordpress -o jsonpath='{.spec.template.spec.containers[?(@.name=="wordpress")].image}')
+    if [[ "$deployed_image" != *"@$image_digest" ]]; then
+      printf 'The deployed WordPress image does not match the released digest.\n' >&2
+      exit 1
+    fi
+    "${kubectl_command[@]}" --namespace "$namespace" rollout status deployment/wordpress --timeout=5m >/dev/null
+    printf 'wordpress_release_image=matches\n'
+    release_versions=$("${kubectl_command[@]}" --namespace "$namespace" exec deployment/wordpress -c wordpress -- sh -c '
+      printf "image_core=%s\n" "$(grep -o "wp_version = .[0-9.]*" /usr/src/wordpress/wp-includes/version.php | grep -o "[0-9][0-9.]*")"
+      printf "volume_core=%s\n" "$(grep -o "wp_version = .[0-9.]*" /var/www/html/wp-includes/version.php | grep -o "[0-9][0-9.]*")"
+      printf "php=%s\n" "$(php -r "echo PHP_VERSION;")"
+      printf "unreadable=%s\n" "$(find /var/www/html -path /var/www/html/wp-content -prune -o -type f ! -name wp-config.php ! -perm -g=r -print | wc -l | tr -d " ")"
+    ')
+    image_core=$(sed -n 's/^image_core=//p' <<< "$release_versions")
+    volume_core=$(sed -n 's/^volume_core=//p' <<< "$release_versions")
+    unreadable=$(sed -n 's/^unreadable=//p' <<< "$release_versions")
+    if [[ -z "$image_core" || "$image_core" != "$volume_core" ]]; then
+      printf 'WordPress core on the volume (%s) does not match the image (%s).\n' "$volume_core" "$image_core" >&2
+      exit 1
+    fi
+    if [[ "$unreadable" != "0" ]]; then
+      printf 'WordPress core files without group read would stop Nginx serving the site: %s.\n' "$unreadable" >&2
+      exit 1
+    fi
+    cron_image=$("${kubectl_command[@]}" --namespace "$namespace" get cronjob wordpress-cron -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}')
+    cron_secrets=$("${kubectl_command[@]}" --namespace "$namespace" get cronjob wordpress-cron -o jsonpath='{.spec.jobTemplate.spec.template.spec.imagePullSecrets[*].name}')
+    if [[ "$cron_image" != "$deployed_image" || -z "$cron_secrets" ]]; then
+      printf 'The WordPress cron job must use the released image and an image pull secret.\n' >&2
+      exit 1
+    fi
+    login_code=$(curl --silent --output /dev/null --write-out '%{http_code}' --header "Host: $hostname" --max-time 20 http://127.0.0.1/wp-login.php || true)
+    if [[ "$login_code" != "200" ]]; then
+      printf 'WordPress login returned HTTP %s instead of 200.\n' "$login_code" >&2
+      exit 1
+    fi
+    printf 'wordpress_core=%s\n' "$volume_core"
+    printf 'wordpress_php=%s\n' "$(sed -n 's/^php=//p' <<< "$release_versions")"
+    printf 'wordpress_verify-release=ready\n'
     ;;
 esac
